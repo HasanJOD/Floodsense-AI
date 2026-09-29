@@ -1,0 +1,47 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-flood-bg: #0b1220;
+  --color-flood-panel: #121a2b;
+  --color-flood-panel-2: #1b2438;
+  --color-flood-border: #2a3550;
+  --color-flood-text: #e6edf6;
+  --color-flood-muted: #9fb0c9;
+  --color-flood-accent: #22d3ee;
+  --color-risk-low: #22c55e;
+  --color-risk-moderate: #eab308;
+  --color-risk-high: #f97316;
+  --color-risk-severe: #ef4444;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-flood-bg);
+  color: var(--color-flood-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Risk band badge colors */
+.badge-low { background: rgba(34,197,94,0.15); color: var(--color-risk-low); border: 1px solid rgba(34,197,94,0.4); }
+.badge-moderate { background: rgba(234,179,8,0.15); color: var(--color-risk-moderate); border: 1px solid rgba(234,179,8,0.4); }
+.badge-high { background: rgba(249,115,22,0.15); color: var(--color-risk-high); border: 1px solid rgba(249,115,22,0.4); }
+.badge-severe { background: rgba(239,68,68,0.15); color: var(--color-risk-severe); border: 1px solid rgba(239,68,68,0.4); }
+
+.alert-pulse {
+  animation: alertpulse 1.6s ease-in-out infinite;
+}
+@keyframes alertpulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.5); }
+  50% { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+}
+
+@keyframes fadein {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in { animation: fadein 0.3s ease-out; }
+
+.scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: #2a3550; border-radius: 4px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
