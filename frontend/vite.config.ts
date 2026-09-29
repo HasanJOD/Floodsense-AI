@@ -9,6 +9,8 @@ export default defineConfig({
     proxy: {
       '/health': 'http://127.0.0.1:8000',
       '/flood-probability': 'http://127.0.0.1:8000',
+      '/flood-grid': 'http://127.0.0.1:8000',
+      '/geocode': 'http://127.0.0.1:8000',
       '/monitor': 'http://127.0.0.1:8000',
     },
   },

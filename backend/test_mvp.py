@@ -8,6 +8,7 @@ from __future__ import annotations
 import time
 from unittest import mock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from main import app, MONITORED
@@ -219,3 +220,194 @@ def test_monitor_delete_missing():
     _clear_monitors()
     r = client.delete("/monitor/9999")
     assert r.status_code == 404
+
+
+# --- Grid / batch / geocode / series extensions ---
+
+from weather import BATCH_SIZE_LIMIT, fetch_weather_batch, fetch_weather_series
+from geocode import search_places
+
+
+def _mock_times(n=30):
+    return [f"2026-01-01T{h:02d}:00" for h in range(n)]
+
+
+def _mock_raw_for_batch(points):
+    """Build a multi-coordinate raw response list matching *points*."""
+    raw = []
+    for _ in points:
+        raw.append(
+            {
+                "hourly": {
+                    "time": _mock_times(30),
+                    "precipitation": [1.0] * 30,
+                }
+            }
+        )
+    return raw
+
+
+def test_grid_shape():
+    _cache.clear()
+    raw = _mock_raw_for_batch([(13.04, 80.24)] * 36)
+    with mock.patch("weather._fetch_raw_batch", return_value=raw), \
+         mock.patch("weather._fetch_elevation", return_value=0.0):
+        results = fetch_weather_batch([(13.04, 80.24)] * 36)
+    assert len(results) == 36
+    assert all(r is not None for r in results)
+    assert results[0]["rain_24h"] == 24.0
+
+
+def test_grid_batch_is_single_call():
+    _cache.clear()
+    raw = _mock_raw_for_batch([(13.04, 80.24)] * 36)
+    with mock.patch("weather._fetch_raw_batch", return_value=raw) as mocked, \
+         mock.patch("weather._fetch_elevation", return_value=0.0):
+        fetch_weather_batch([(13.04, 80.24)] * 36)
+    assert mocked.call_count == 1
+
+
+def test_batch_normalises_single_and_multi():
+    _cache.clear()
+
+    # Single-point response returns a dict (not a list).
+    single_raw = {"hourly": {"time": _mock_times(30), "precipitation": [2.0] * 30}}
+    with mock.patch("weather._fetch_raw_batch", return_value=single_raw), \
+         mock.patch("weather._fetch_elevation", return_value=0.0):
+        results = fetch_weather_batch([(13.04, 80.24)])
+    assert len(results) == 1
+    assert results[0] is not None
+    assert results[0]["rain_24h"] == 48.0
+
+    # Multi-point response returns a list.
+    _cache.clear()
+    multi_raw = [
+        {"hourly": {"time": _mock_times(30), "precipitation": [1.0] * 30}},
+        {"hourly": {"time": _mock_times(30), "precipitation": [3.0] * 30}},
+    ]
+    with mock.patch("weather._fetch_raw_batch", return_value=multi_raw), \
+         mock.patch("weather._fetch_elevation", return_value=0.0):
+        results = fetch_weather_batch([(13.0, 80.0), (13.1, 80.1)])
+    assert len(results) == 2
+    assert results[0]["rain_24h"] == 24.0
+    assert results[1]["rain_24h"] == 72.0
+
+
+def test_batch_oversize_raises():
+    with pytest.raises(ValueError):
+        fetch_weather_batch([(0, 0)] * (BATCH_SIZE_LIMIT + 1))
+
+
+def test_series_is_24_historical_hours():
+    times = [f"2026-01-01T{h:02d}:00" for h in range(48)]
+    precip = [10.0] * 24 + [1.0] * 24
+    raw = {"hourly": {"time": times, "precipitation": precip}}
+    _cache.clear()
+    with mock.patch("weather._fetch_raw", return_value=raw), \
+         mock.patch("weather._fetch_elevation", return_value=0.0):
+        series = fetch_weather_series(13.04, 80.24)
+    assert len(series) == 24
+    # Only the trailing 24 entries (all 1.0) should appear, never the 10.0s.
+    assert all(s["precipitation"] == 1.0 for s in series)
+
+
+def test_geocode_maps_results():
+    raw = {
+        "results": [
+            {"name": "Berlin", "country": "Germany", "admin1": "Berlin", "latitude": 52.52, "longitude": 13.405},
+            {"name": "Berlin", "country": "United States", "admin1": "New Hampshire", "latitude": 42.87, "longitude": -71.85},
+        ]
+    }
+    with mock.patch("geocode._fetch_geocode_raw", return_value=raw):
+        results = search_places("Berlin")
+    assert len(results) == 2
+    assert results[0]["name"] == "Berlin, Germany"
+    assert results[1]["name"] == "Berlin, New Hampshire"
+    assert results[0]["latitude"] == 52.52
+
+
+def test_geocode_empty_query_returns_empty_list():
+    assert search_places("") == []
+
+
+def _mock_weather_for_grid(res=6):
+    """Build weather results for a grid of *res* x *res* cells."""
+    return {
+        "rain_1h": 1.0,
+        "rain_6h": 6.0,
+        "rain_24h": 24.0,
+        "elevation_m": 10.0,
+        "soil_moisture": 0.3,
+        "source": "open-meteo",
+        "fetch_timestamp": "2026-01-01T00:00:00Z",
+        "stale": False,
+    }
+
+
+def test_grid_endpoint_shape():
+    _cache.clear()
+    n = 6 * 6
+    batch_result = [_mock_weather_for_grid() for _ in range(n)]
+    with mock.patch("main.fetch_weather_batch", return_value=batch_result):
+        r = client.get("/flood-grid", params={
+            "north": 14.0, "south": 12.0, "east": 81.0, "west": 79.0, "res": 6,
+        })
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["cells"]) == n
+    for cell in body["cells"]:
+        assert 12.0 < cell["lat"] < 14.0
+        assert 79.0 < cell["lon"] < 81.0
+    assert body["min_probability"] is not None
+    assert body["max_probability"] is not None
+
+
+def test_grid_res_clamped():
+    _cache.clear()
+    batch_result = [_mock_weather_for_grid() for _ in range(8 * 8)]
+    def _fake_batch(points):
+        return batch_result[:len(points)]
+    with mock.patch("main.fetch_weather_batch", side_effect=_fake_batch):
+        r = client.get("/flood-grid", params={
+            "north": 14.0, "south": 12.0, "east": 81.0, "west": 79.0, "res": 99,
+        })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["res"] == 8
+    assert len(body["cells"]) == 64
+
+    _cache.clear()
+    r2 = client.get("/flood-grid", params={
+        "north": 14.0, "south": 12.0, "east": 81.0, "west": 79.0, "res": 1,
+    })
+    assert r2.status_code == 400
+
+
+def test_grid_endpoint_single_call():
+    _cache.clear()
+    n = 6 * 6
+    batch_result = [_mock_weather_for_grid() for _ in range(n)]
+    with mock.patch("main.fetch_weather_batch", return_value=batch_result) as mocked:
+        client.get("/flood-grid", params={
+            "north": 14.0, "south": 12.0, "east": 81.0, "west": 79.0, "res": 6,
+        })
+    assert mocked.call_count == 1
+
+
+def test_grid_inverted_bounds_400():
+    r = client.get("/flood-grid", params={
+        "north": 12.0, "south": 14.0, "east": 81.0, "west": 79.0, "res": 6,
+    })
+    assert r.status_code == 400
+
+
+def test_flood_probability_includes_hourly():
+    _cache.clear()
+    times = [f"2026-01-01T{h:02d}:00" for h in range(30)]
+    raw = {"hourly": {"time": times, "precipitation": [1.0] * 30}}
+    with mock.patch("weather._fetch_raw", return_value=raw), \
+         mock.patch("weather._fetch_elevation", return_value=0.0):
+        r = client.get("/flood-probability", params={"lat": 13.04, "lon": 80.24})
+    assert r.status_code == 200
+    assert "hourly" in r.json()
+    assert isinstance(r.json()["hourly"], list)
